@@ -12,7 +12,26 @@ class RequestError(PhynError):
 
     ...
 
+
 class BrandError(Exception):
-    """ Define an error related to invalid brands."""
+    """Define an error related to invalid brands."""
+
+    ...
+
+
+class KohlerAuthError(PhynError):
+    """Base Kohler authentication error."""
+
+    ...
+
+
+class KohlerB2CError(KohlerAuthError):
+    """Kohler B2C authentication failed."""
+
+    ...
+
+
+class KohlerTokenError(KohlerAuthError):
+    """Failed to get Kohler tokens."""
 
     ...
