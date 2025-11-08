@@ -1,4 +1,4 @@
-""" Module providing a MQTT provider """
+"""Module providing a MQTT provider"""
 
 import asyncio
 import logging
@@ -19,48 +19,45 @@ from .const import API_BASE
 
 _LOGGER = logging.getLogger(__name__)
 
+
 class AIOHelper:
     """Helper class for Asynchronous IO"""
+
     def __init__(self, client: paho_mqtt.Client) -> None:
         self.loop = asyncio.get_running_loop()
         self.client = client
         self.client.on_socket_open = self._on_socket_open
         self.client.on_socket_close = self._on_socket_close
         self.client._on_socket_register_write = self._on_socket_register_write
-        self.client._on_socket_unregister_write = \
-            self._on_socket_unregister_write
+        self.client._on_socket_unregister_write = self._on_socket_unregister_write
         self.misc_task: Optional[asyncio.Task] = None
 
-    def _on_socket_open(self,
-                        client: paho_mqtt.Client,
-                        userdata: Any,
-                        sock: socket.socket
-                        ) -> None:
+    def _on_socket_open(
+        self, client: paho_mqtt.Client, userdata: Any, sock: socket.socket
+    ) -> None:
         # pylint: disable=unused-argument
         _LOGGER.info("MQTT Socket Opened")
         self.loop.add_reader(sock, client.loop_read)
         self.misc_task = self.loop.create_task(self.misc_loop())
 
-    def _on_socket_close(self, client: paho_mqtt.Client, userdata: Any, sock: socket.socket) -> None:
+    def _on_socket_close(
+        self, client: paho_mqtt.Client, userdata: Any, sock: socket.socket
+    ) -> None:
         # pylint: disable=unused-argument
         _LOGGER.info("MQTT Socket Closed")
         self.loop.remove_reader(sock)
         if self.misc_task is not None:
             self.misc_task.cancel()
 
-    def _on_socket_register_write(self,
-                                  client: paho_mqtt.Client,
-                                  userdata: Any,
-                                  sock: socket.socket
-                                  ) -> None:
+    def _on_socket_register_write(
+        self, client: paho_mqtt.Client, userdata: Any, sock: socket.socket
+    ) -> None:
         # pylint: disable=unused-argument
         self.loop.add_writer(sock, client.loop_write)
 
-    def _on_socket_unregister_write(self,
-                                    client: paho_mqtt.Client,
-                                    userdata: Any,
-                                    sock: socket.socket
-                                    ) -> None:
+    def _on_socket_unregister_write(
+        self, client: paho_mqtt.Client, userdata: Any, sock: socket.socket
+    ) -> None:
         # pylint: disable=unused-argument
         self.loop.remove_writer(sock)
 
@@ -73,8 +70,10 @@ class AIOHelper:
                 break
         _LOGGER.info("MQTT Misc Loop Complete")
 
+
 class Timer:
-    """ Class to run a job with a timeout """
+    """Class to run a job with a timeout"""
+
     def __init__(self, callback):
         _LOGGER.info("Creating timer")
         self._timeout = 0
@@ -82,7 +81,7 @@ class Timer:
         self._task = None
 
     async def _job(self, timeout):
-        """ Run the job with a timeout """
+        """Run the job with a timeout"""
         await asyncio.sleep(timeout)
         _LOGGER.debug("Executing timer callback")
         if inspect.iscoroutinefunction(self._callback):
@@ -91,21 +90,30 @@ class Timer:
             self._callback()
 
     def cancel(self):
-        """ Cancel a timer task """
+        """Cancel a timer task"""
         if self._task is not None:
             self._task.cancel()
             self._task = None
 
     def start(self, timeout):
-        """ Start a timer task """
+        """Start a timer task"""
         if self._task is not None:
             self._task.cancel()
         _LOGGER.debug("Starting timer job for %s seconds", timeout)
         self._task = asyncio.create_task(self._job(timeout))
 
+
 class MQTTClient:
-    """AIO MQTT client """
-    def __init__(self, api, client_id: str =None, verify_ssl: bool =True, proxy: str =None, proxy_port: int =None):
+    """AIO MQTT client"""
+
+    def __init__(
+        self,
+        api,
+        client_id: str = None,
+        verify_ssl: bool = True,
+        proxy: str = None,
+        proxy_port: int = None,
+    ):
         self.event_loop = asyncio.get_running_loop()
         self.api = api
         self.pending_acks = {}
@@ -114,7 +122,7 @@ class MQTTClient:
         self.connect_task = None
         self.disconnect_evt: Optional[asyncio.Event] = None
         self.reconnect_evt: asyncio.Event = asyncio.Event()
-        self.host = None 
+        self.host = None
         self.port = 443
 
         if client_id is None:
@@ -133,11 +141,7 @@ class MQTTClient:
         self.client.on_subscribe = self._on_subscribe
         self.client.on_message = self._on_message
 
-        self._handlers = {
-            "connect": [],
-            "disconnect": [],
-            "update": []
-        }
+        self._handlers = {"connect": [], "disconnect": [], "update": []}
 
     async def add_event_handler(self, type, target):
         """Add an event handler for MQTT events"""
@@ -149,9 +153,9 @@ class MQTTClient:
         self._handlers[type].append(target)
 
     async def connect(self):
-        """ Create a conenction to the MQTT server """
+        """Create a conenction to the MQTT server"""
         self.host, path = await self.get_mqtt_info()
-        self.client.ws_set_options(path, headers={'Host': self.host})
+        self.client.ws_set_options(path, headers={"Host": self.host})
 
         if self.verify_ssl:
             context = ssl.SSLContext()
@@ -164,45 +168,48 @@ class MQTTClient:
             self.client.tls_insecure_set(True)
 
         if self.proxy is not None and self.proxy_port is not None:
-            self.client.proxy_set(proxy_type=socks.HTTP, proxy_addr=self.proxy, proxy_port=self.proxy_port)
+            self.client.proxy_set(
+                proxy_type=socks.HTTP, proxy_addr=self.proxy, proxy_port=self.proxy_port
+            )
 
         self.helper = AIOHelper(self.client)
         _LOGGER.info("Connecting to mqtt websocket: %s", self.host)
         self.reconnect_timer.start(5)
         await self.event_loop.run_in_executor(
-                None,
-                self.client.connect,
-                self.host,
-                self.port,
-            )
-    
+            None,
+            self.client.connect,
+            self.host,
+            self.port,
+        )
+
     def disconnect(self):
         """Disconnect from server"""
         self.disconnect_evt = asyncio.Event()
         _LOGGER.info("MQTT client disconnecting...")
         self.client.disconnect()
-    
+
     async def disconnect_and_wait(self):
         """Disconnect from server and wait"""
         self.disconnect()
         await self.disconnect_evt.wait()
 
     async def get_mqtt_info(self):
-        """ Gets WebSocket URL and parameters for a MQTT connection
-            Returns a list of url and path
+        """Gets WebSocket URL and parameters for a MQTT connection
+        Returns a list of url and path
         """
         user_id = urllib.parse.quote_plus(self.api.username)
         try:
-            wss_data = await self.api._request("post", f"{API_BASE}/users/{user_id}/iot_policy", token_type="id")
+            wss_data = await self.api._request(
+                "post", f"{API_BASE}/users/{user_id}/iot_policy", token_type="id"
+            )
         except:
             Exception("Could not get WebSocket/MQTT url from API")
 
-        match = re.match(r'wss:\/\/([a-zA-Z0-9\.\-]+)(\/mqtt?.*)', wss_data['wss_url'])
+        match = re.match(r"wss:\/\/([a-zA-Z0-9\.\-]+)(\/mqtt?.*)", wss_data["wss_url"])
         if not match:
             raise Exception("Could not find WebSocket/MQTT url")
 
         return match.group(1), match.group(2)
-
 
     async def subscribe(self, topic):
         """Subscribe to a MQTT topic"""
@@ -210,14 +217,14 @@ class MQTTClient:
         res, msg_id = self.client.subscribe(topic, 0)
         self.pending_acks[msg_id] = topic
 
-
-    def _on_connect(self,
-                    client: paho_mqtt.Client,
-                    user_data: Any,
-                    flags: Dict[str, Any],
-                    reason_code: Union[int, paho_mqtt.ReasonCodes],
-                    properties: Optional[paho_mqtt.Properties] = None
-                    ) -> None:
+    def _on_connect(
+        self,
+        client: paho_mqtt.Client,
+        user_data: Any,
+        flags: Dict[str, Any],
+        reason_code: Union[int, paho_mqtt.ReasonCodes],
+        properties: Optional[paho_mqtt.Properties] = None,
+    ) -> None:
         # pylint: disable=unused-argument
         _LOGGER.info("MQTT Client Connected")
         if reason_code == 0:
@@ -232,30 +239,40 @@ class MQTTClient:
                 err_str = reason_code.getName()
             _LOGGER.info("MQTT Connection Failed: %s", err_str)
 
-    def _on_disconnect(self,
-                       client: paho_mqtt.Client,
-                       user_data: Any,
-                       reason_code: int,
-                       properties: Optional[paho_mqtt.Properties] = None
-                       ) -> None:
+    def _on_disconnect(
+        self,
+        client: paho_mqtt.Client,
+        user_data: Any,
+        reason_code: int,
+        properties: Optional[paho_mqtt.Properties] = None,
+    ) -> None:
         # pylint: disable=unused-argument
+        # Validate reason_code to handle None or invalid values
+        if reason_code is None:
+            reason_str = "Unknown (None)"
+        else:
+            try:
+                reason_str = paho_mqtt.error_string(reason_code)
+            except Exception:
+                reason_str = f"Unknown ({reason_code})"
+
         if self.disconnect_evt is not None:
             self.disconnect_evt.set()
             _LOGGER.info("Client disconnected, not attempting to reconnect")
         elif self.is_connected():
             # The server connection was dropped, attempt to reconnect
-            _LOGGER.info("MQTT Server Disconnected, reason: %s", paho_mqtt.error_string(reason_code))
+            _LOGGER.info("MQTT Server Disconnected, reason: %s", reason_str)
             self.reconnect_timer.cancel()
             if self.connect_task is None:
                 self.connect_task = asyncio.create_task(self._do_reconnect(True))
         self.connect_evt.clear()
 
     def is_connected(self) -> bool:
-        """ Checks if the client is connected """
+        """Checks if the client is connected"""
         return self.client.is_connected()
 
     async def _process_reconnect(self):
-        #self.connect_task = True
+        # self.connect_task = True
         _LOGGER.info("Processing reconnect request")
 
         self.disconnect_evt = asyncio.Event()
@@ -272,55 +289,69 @@ class MQTTClient:
 
         _LOGGER.info("Attempting MQTT Connect/Reconnect")
         self.reconnect_evt.set()
+        max_attempts = 20
         last_err: Exception = Exception()
         connect_attempts = 0
-        t: float = 2.
-        while True:
-            if not first:
+        t: float = 2.0
+
+        try:
+            while connect_attempts < max_attempts:
+                if not first:
+                    try:
+                        if connect_attempts > 6:
+                            t = 60.0
+                        elif connect_attempts > 3:
+                            t = 10.0
+                        _LOGGER.debug("MQTT throttle for %s seconds", t)
+                        await asyncio.sleep(t)
+                    except asyncio.CancelledError:
+                        raise
+                first = False
+                connect_attempts += 1
                 try:
-                    if connect_attempts > 6:
-                        t = 60.
-                    elif connect_attempts > 3:
-                        t = 10.
-                    _LOGGER.debug("MQTT throttle for %s seconds", t)
-                    await asyncio.sleep(t)
-                except asyncio.CancelledError:
-                    self.reconnect_evt.clear()
-                    raise
-            first = False
-            connect_attempts += 1
-            try:
-                self.host, path = await self.get_mqtt_info()
-                self.client.ws_set_options(path, headers={'Host': self.host})
-                _LOGGER.info("Attempting to reconnnect...")
-                await self.event_loop.run_in_executor(
+                    # Use timeout to prevent hanging on get_mqtt_info
+                    async with asyncio.timeout(5):
+                        self.host, path = await self.get_mqtt_info()
+                    self.client.ws_set_options(path, headers={"Host": self.host})
+                    _LOGGER.info("Attempting to reconnnect...")
+                    await self.event_loop.run_in_executor(
                         None,
                         self.client.connect,
                         self.host,
                         self.port,
                     )
 
-                await asyncio.wait_for(self.connect_evt.wait(), timeout=2.)
-                if not self.connect_evt.is_set():
-                    _LOGGER.info("Timeout while waiting for MQTT connection")
+                    await asyncio.wait_for(self.connect_evt.wait(), timeout=2.0)
+                    if not self.connect_evt.is_set():
+                        _LOGGER.info("Timeout while waiting for MQTT connection")
+                        continue
+
+                    # Re-subscribe to all topics
+                    topics = list(set(self.topics))
+                    tasks = [self.subscribe(topic) for topic in topics]
+                    await asyncio.gather(*tasks)
+                    break  # Success - exit the retry loop
+                except asyncio.CancelledError:
+                    raise
+                except asyncio.TimeoutError:
+                    if type(last_err) is not asyncio.TimeoutError:
+                        _LOGGER.warning("MQTT Connection Timeout")
+                        last_err = asyncio.TimeoutError()
+                    continue
+                except Exception as e:
+                    if type(last_err) is not type(e) or last_err.args != e.args:
+                        _LOGGER.warning("MQTT Connection Error: %s", str(e))
+                        last_err = e
                     continue
 
-                # Re-subscribe to all topics
-                topics = list(set(self.topics))
-                tasks = [self.subscribe(topic) for topic in topics]
-                await asyncio.gather(*tasks)
-            except asyncio.CancelledError:
-                self.reconnect_evt.clear()
-                raise
-            except Exception as e:
-                if type(last_err) is not type(e) or last_err.args != e.args:
-                    _LOGGER.warning("MQTT Connection Error")
-                    last_err = e
-                continue
-            break
-        self.reconnect_evt.clear()
-        self.disconnect_evt = None
-        self.connect_task = None
+            if connect_attempts >= max_attempts:
+                _LOGGER.error(
+                    "Max reconnection attempts (%d) reached, giving up", max_attempts
+                )
+        finally:
+            self.reconnect_evt.clear()
+            self.disconnect_evt = None
+            self.connect_task = None
 
     def _on_message(
         self, client: paho_mqtt.Client, userdata: Any, message: paho_mqtt.MQTTMessage
@@ -334,7 +365,7 @@ class MQTTClient:
             _LOGGER.info("Received invalid JSON message: %s", msg)
 
         if message.topic.startswith("prd/app_subscriptions/"):
-            device_id = message.topic.split('/')[2]
+            device_id = message.topic.split("/")[2]
         else:
             device_id = None
 
