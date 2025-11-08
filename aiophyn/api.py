@@ -1,4 +1,5 @@
 """Define a base client for interacting with Phyn."""
+
 import asyncio
 import logging
 from concurrent.futures import ThreadPoolExecutor
@@ -20,8 +21,8 @@ from .home import Home
 _LOGGER = logging.getLogger(__name__)
 
 BRANDS = {
-    'phyn': 0,
-    'kohler': 1,
+    "phyn": 0,
+    "kohler": 1,
 }
 
 DEFAULT_HEADER_CONTENT_TYPE: str = "application/json"
@@ -45,9 +46,16 @@ class API:
     """Define the API object."""
 
     def __init__(
-        self, username: str, password: str, *, phyn_brand: str, session: Optional[ClientSession] = None,
-        client_id: Optional[str] = None, verify_ssl: bool = True, proxy: Optional[str] = None,
-        proxy_port: Optional[int] = None
+        self,
+        username: str,
+        password: str,
+        *,
+        phyn_brand: str,
+        session: Optional[ClientSession] = None,
+        client_id: Optional[str] = None,
+        verify_ssl: bool = True,
+        proxy: Optional[str] = None,
+        proxy_port: Optional[int] = None,
     ) -> None:
         """Initialize."""
         if phyn_brand not in BRANDS:
@@ -56,7 +64,7 @@ class API:
         self._brand: str = BRANDS[phyn_brand]
 
         self._username: str = username
-        if self._brand != BRANDS['phyn']:
+        if self._brand != BRANDS["phyn"]:
             self._password: str = None
             self._partner_api = None
             self._partner_password: str = password
@@ -86,17 +94,26 @@ class API:
 
         self._token: Optional[str] = None
         self._token_expiration: Optional[datetime] = None
+        self._auth_lock: asyncio.Lock = asyncio.Lock()
 
         self.home: Home = Home(self._request)
         self.device: Device = Device(self._request)
-        self.mqtt = MQTTClient(self, client_id=client_id, verify_ssl=verify_ssl, proxy=proxy, proxy_port=proxy_port)
+        self.mqtt = MQTTClient(
+            self,
+            client_id=client_id,
+            verify_ssl=verify_ssl,
+            proxy=proxy,
+            proxy_port=proxy_port,
+        )
 
     @property
     def username(self) -> Optional[str]:
         """Get the API username"""
         return self._username
 
-    async def _request(self, method: str, url: str, token_type:str = "access", **kwargs) -> dict:
+    async def _request(
+        self, method: str, url: str, token_type: str = "access", **kwargs
+    ) -> dict:
         """Make a request against the API.
 
         :param method: GET or POST request
@@ -110,16 +127,19 @@ class API:
         :rtype: dict
         """
         if self._token_expiration and datetime.now() >= self._token_expiration:
-            _LOGGER.info("Requesting new access token to replace expired one")
+            async with self._auth_lock:
+                # Double-check after acquiring lock to avoid duplicate authentication
+                if self._token_expiration and datetime.now() >= self._token_expiration:
+                    _LOGGER.info("Requesting new access token to replace expired one")
 
-            # Nullify the token so that the authentication request doesn't use it:
-            self._token = None
+                    # Nullify the token so that the authentication request doesn't use it:
+                    self._token = None
 
-            # Nullify the expiration so the authentication request doesn't get caught
-            # here:
-            self._token_expiration = None
+                    # Nullify the expiration so the authentication request doesn't get caught
+                    # here:
+                    self._token_expiration = None
 
-            await self.async_authenticate()
+                    await self.async_authenticate()
 
         kwargs.setdefault("headers", {})
         kwargs["headers"].update(
@@ -169,8 +189,13 @@ class API:
         if self._brand == BRANDS["kohler"]:
             if self._password is None:
                 _LOGGER.info("Auhenticating to Kohler")
-                self._partner_api = KOHLER_API(self._username, self._partner_password, verify_ssl=self.verify_ssl,
-                                               proxy=self.proxy, proxy_port=self.proxy_port)
+                self._partner_api = KOHLER_API(
+                    self._username,
+                    self._partner_password,
+                    verify_ssl=self.verify_ssl,
+                    proxy=self.proxy,
+                    proxy_port=self.proxy_port,
+                )
                 await self._partner_api.authenticate()
                 self._password = self._partner_api.get_phyn_password()
                 self._cognito = self._partner_api.get_cognito_info()
@@ -193,12 +218,12 @@ class API:
     def _authenticate(self):
         """boto3 is synchronous, so authenticate in a separate thread."""
         _LOGGER.info("Requesting token from AWS")
-        client = boto3.client("cognito-idp", region_name=self._cognito['region'])
+        client = boto3.client("cognito-idp", region_name=self._cognito["region"])
         aws = AWSSRP(
             username=self._username,
             password=self._password,
-            pool_id=self._cognito['pool_id'],
-            client_id=self._cognito['app_client_id'],
+            pool_id=self._cognito["pool_id"],
+            client_id=self._cognito["app_client_id"],
             client=client,
         )
         auth_response = aws.authenticate_user()
@@ -206,9 +231,15 @@ class API:
 
 
 async def async_get_api(
-    username: str, password: str, *, phyn_brand: str = "phyn", session: Optional[ClientSession] = None,
-    client_id: Optional[str] = None, verify_ssl: bool = True, proxy: Optional[str] = None,
-    proxy_port: Optional[int] = None
+    username: str,
+    password: str,
+    *,
+    phyn_brand: str = "phyn",
+    session: Optional[ClientSession] = None,
+    client_id: Optional[str] = None,
+    verify_ssl: bool = True,
+    proxy: Optional[str] = None,
+    proxy_port: Optional[int] = None,
 ) -> API:
     """Instantiate an authenticated API object.
 
@@ -230,7 +261,15 @@ async def async_get_api(
     :type proxy_port: ``int``
     :rtype: :meth:`aiophyn.api.API`
     """
-    api = API(username, password, phyn_brand=phyn_brand, session=session, client_id=client_id,
-              verify_ssl=verify_ssl, proxy=proxy, proxy_port=proxy_port)
+    api = API(
+        username,
+        password,
+        phyn_brand=phyn_brand,
+        session=session,
+        client_id=client_id,
+        verify_ssl=verify_ssl,
+        proxy=proxy,
+        proxy_port=proxy_port,
+    )
     await api.async_authenticate()
     return api
