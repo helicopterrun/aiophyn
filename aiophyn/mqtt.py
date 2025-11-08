@@ -16,6 +16,7 @@ import socks
 import paho.mqtt.client as paho_mqtt
 
 from .const import API_BASE
+from .errors import RequestError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -217,6 +218,40 @@ class MQTTClient:
         res, msg_id = self.client.subscribe(topic, 0)
         self.pending_acks[msg_id] = topic
 
+    async def _subscribe_with_ack(self, topic: str, timeout: int = 5) -> tuple:
+        """Subscribe and wait for acknowledgment
+
+        Args:
+            topic: The MQTT topic to subscribe to
+            timeout: Maximum time to wait for subscription acknowledgment
+
+        Returns:
+            Tuple of (result_code, message_id)
+
+        Raises:
+            RequestError: If subscription acknowledgment times out
+        """
+        # Use a unique event per subscription attempt
+        ack_evt = asyncio.Event()
+
+        try:
+            async with asyncio.timeout(timeout):
+                res, msg_id = self.client.subscribe(topic, 0)
+                if res != paho_mqtt.MQTT_ERR_SUCCESS:
+                    _LOGGER.error(
+                        "Failed to initiate subscription to %s: %s", topic, res
+                    )
+                    return res, msg_id
+
+                # Store event for this specific message ID
+                self.pending_acks[msg_id] = (topic, ack_evt)
+
+                # Wait for SUBACK
+                await ack_evt.wait()
+                return res, msg_id
+        except asyncio.TimeoutError:
+            raise RequestError(f"Subscription ACK timeout for {topic}")
+
     def _on_connect(
         self,
         client: paho_mqtt.Client,
@@ -326,10 +361,50 @@ class MQTTClient:
                         _LOGGER.info("Timeout while waiting for MQTT connection")
                         continue
 
-                    # Re-subscribe to all topics
-                    topics = list(set(self.topics))
-                    tasks = [self.subscribe(topic) for topic in topics]
-                    await asyncio.gather(*tasks)
+                    # Clean up stale pending_acks from before disconnect
+                    stale_acks = [mid for mid in self.pending_acks.keys()]
+                    if stale_acks:
+                        _LOGGER.debug(
+                            "Cleaning up %d stale pending_acks", len(stale_acks)
+                        )
+                        for mid in stale_acks:
+                            del self.pending_acks[mid]
+
+                    # Re-subscribe to all topics with verification
+                    topics_to_subscribe = list(set(self.topics))
+                    successful_subs = set()
+
+                    for topic in topics_to_subscribe:
+                        try:
+                            async with asyncio.timeout(5):
+                                res, msg_id = await self._subscribe_with_ack(topic)
+                                if res == paho_mqtt.MQTT_ERR_SUCCESS:
+                                    successful_subs.add(topic)
+                                else:
+                                    _LOGGER.error(
+                                        "Failed to re-subscribe to %s: %s", topic, res
+                                    )
+                        except RequestError as e:
+                            _LOGGER.error("Error re-subscribing to %s: %s", topic, e)
+                        except Exception as e:
+                            _LOGGER.error(
+                                "Unexpected error re-subscribing to %s: %s", topic, e
+                            )
+
+                    if successful_subs != set(topics_to_subscribe):
+                        failed = set(topics_to_subscribe) - successful_subs
+                        _LOGGER.warning(
+                            "Failed to re-subscribe to %d topics: %s",
+                            len(failed),
+                            failed,
+                        )
+                        # Continue anyway - partial success is better than failing the whole reconnect
+                    else:
+                        _LOGGER.info(
+                            "Successfully re-subscribed to all %d topics",
+                            len(topics_to_subscribe),
+                        )
+
                     break  # Success - exit the retry loop
                 except asyncio.CancelledError:
                     raise
@@ -382,8 +457,22 @@ class MQTTClient:
     ) -> None:
         # pylint: disable=unused-argument
         if mid in self.pending_acks:
-            _LOGGER.info("Subscribed to: %s", self.pending_acks[mid])
-            self.topics.append(self.pending_acks[mid])
+            pending_info = self.pending_acks[mid]
+
+            # Handle both old format (string) and new format (tuple with event)
+            if isinstance(pending_info, tuple):
+                topic, ack_evt = pending_info
+                _LOGGER.info("Subscribed to: %s", topic)
+                if topic not in self.topics:
+                    self.topics.append(topic)
+                ack_evt.set()  # Signal that subscription is complete
+            else:
+                # Old format - just a topic string
+                topic = pending_info
+                _LOGGER.info("Subscribed to: %s", topic)
+                if topic not in self.topics:
+                    self.topics.append(topic)
+
             del self.pending_acks[mid]
         else:
             _LOGGER.info("Subscribed: %s %s %s", userdata, str(mid), str(granted_qos))

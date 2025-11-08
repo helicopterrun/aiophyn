@@ -257,3 +257,312 @@ async def test_exponential_backoff():
                 assert (
                     sleep_time == 60.0
                 ), f"Attempt {i+2} should use 60s backoff, got {sleep_time}"
+
+
+@pytest.mark.asyncio
+async def test_subscription_with_ack_success():
+    """Test that _subscribe_with_ack successfully subscribes and waits for acknowledgment."""
+    mock_api = MagicMock()
+    mock_api.username = "test@example.com"
+
+    with patch("aiophyn.mqtt.paho_mqtt.Client") as mock_mqtt_class:
+        mock_client_instance = MagicMock()
+        mock_mqtt_class.return_value = mock_client_instance
+
+        client = MQTTClient(mock_api)
+
+        # Mock successful subscription
+        mock_client_instance.subscribe.return_value = (
+            0,
+            123,
+        )  # MQTT_ERR_SUCCESS, msg_id
+
+        # Create a task to simulate the acknowledgment
+        async def simulate_ack():
+            await asyncio.sleep(0.1)
+            # Simulate _on_subscribe being called
+            client._on_subscribe(None, None, 123, [0], None)
+
+        # Start the acknowledgment simulation
+        ack_task = asyncio.create_task(simulate_ack())
+
+        # Call _subscribe_with_ack
+        res, msg_id = await client._subscribe_with_ack("test/topic", timeout=2)
+
+        # Wait for the acknowledgment task to complete
+        await ack_task
+
+        # Verify success
+        assert res == 0, "Should return MQTT_ERR_SUCCESS"
+        assert msg_id == 123, "Should return the message ID"
+        assert "test/topic" in client.topics, "Topic should be added to topics list"
+
+
+@pytest.mark.asyncio
+async def test_subscription_with_ack_timeout():
+    """Test that _subscribe_with_ack raises RequestError on timeout."""
+    from aiophyn.errors import RequestError
+
+    mock_api = MagicMock()
+    mock_api.username = "test@example.com"
+
+    with patch("aiophyn.mqtt.paho_mqtt.Client") as mock_mqtt_class:
+        mock_client_instance = MagicMock()
+        mock_mqtt_class.return_value = mock_client_instance
+
+        client = MQTTClient(mock_api)
+
+        # Mock successful subscription initiation but no acknowledgment
+        mock_client_instance.subscribe.return_value = (0, 456)
+
+        # Try to subscribe with a short timeout - should timeout
+        with pytest.raises(RequestError, match="Subscription ACK timeout"):
+            await client._subscribe_with_ack("test/topic", timeout=0.5)
+
+
+@pytest.mark.asyncio
+async def test_subscription_with_ack_failure():
+    """Test that _subscribe_with_ack handles subscription failures."""
+    mock_api = MagicMock()
+    mock_api.username = "test@example.com"
+
+    with patch("aiophyn.mqtt.paho_mqtt.Client") as mock_mqtt_class:
+        mock_client_instance = MagicMock()
+        mock_mqtt_class.return_value = mock_client_instance
+
+        client = MQTTClient(mock_api)
+
+        # Mock failed subscription (non-zero error code)
+        mock_client_instance.subscribe.return_value = (1, 789)  # MQTT error code 1
+
+        # Call _subscribe_with_ack - should return error code
+        res, msg_id = await client._subscribe_with_ack("test/topic", timeout=2)
+
+        assert res == 1, "Should return the error code"
+        assert msg_id == 789, "Should return the message ID"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_cleans_stale_pending_acks():
+    """Test that reconnection cleans up stale pending_acks."""
+    mock_api = MagicMock()
+    mock_api.username = "test@example.com"
+
+    with patch("aiophyn.mqtt.paho_mqtt.Client"):
+        client = MQTTClient(mock_api)
+
+        # Add some stale pending_acks
+        client.pending_acks[111] = "old/topic1"
+        client.pending_acks[222] = "old/topic2"
+
+        # Add a topic to re-subscribe to
+        client.topics = ["test/topic"]
+
+        async def mock_get_mqtt_info():
+            return "host.example.com", "/mqtt"
+
+        client.get_mqtt_info = mock_get_mqtt_info
+
+        # Mock successful connection
+        async def mock_executor(*args):
+            pass
+
+        client.event_loop.run_in_executor = mock_executor
+        client.client.ws_set_options = Mock()
+        client.client.subscribe = Mock(return_value=(0, 333))
+
+        # Mock connect_evt to simulate successful connection
+        async def mock_wait_for(event_wait, timeout):
+            client.connect_evt.set()
+            return True
+
+        # Mock _subscribe_with_ack to simulate successful subscription
+        async def mock_subscribe_with_ack(topic, timeout=5):
+            # Simulate cleaning of stale acks in _do_reconnect
+            return (0, 333)
+
+        client._subscribe_with_ack = mock_subscribe_with_ack
+
+        with patch("asyncio.wait_for", side_effect=mock_wait_for):
+            await client._do_reconnect(first=True)
+
+        # Verify stale acks were cleaned (they should have been cleared during reconnect)
+        # The new subscription shouldn't add to stale acks since we mocked it
+        assert 111 not in client.pending_acks, "Stale ack 111 should be cleaned"
+        assert 222 not in client.pending_acks, "Stale ack 222 should be cleaned"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_verifies_subscription_success():
+    """Test that reconnection verifies all subscriptions succeeded."""
+    mock_api = MagicMock()
+    mock_api.username = "test@example.com"
+
+    with patch("aiophyn.mqtt.paho_mqtt.Client"):
+        client = MQTTClient(mock_api)
+
+        # Add multiple topics to re-subscribe to
+        client.topics = ["topic1", "topic2", "topic3"]
+
+        async def mock_get_mqtt_info():
+            return "host.example.com", "/mqtt"
+
+        client.get_mqtt_info = mock_get_mqtt_info
+
+        # Mock successful connection
+        async def mock_executor(*args):
+            pass
+
+        client.event_loop.run_in_executor = mock_executor
+        client.client.ws_set_options = Mock()
+
+        # Mock connect_evt to simulate successful connection
+        async def mock_wait_for(event_wait, timeout):
+            client.connect_evt.set()
+            return True
+
+        # Track which topics were subscribed
+        subscribed_topics = []
+
+        # Mock _subscribe_with_ack - topic2 fails
+        async def mock_subscribe_with_ack(topic, timeout=5):
+            subscribed_topics.append(topic)
+            if topic == "topic2":
+                from aiophyn.errors import RequestError
+
+                raise RequestError(f"Subscription failed for {topic}")
+            return (0, len(subscribed_topics))
+
+        client._subscribe_with_ack = mock_subscribe_with_ack
+
+        with patch("asyncio.wait_for", side_effect=mock_wait_for):
+            await client._do_reconnect(first=True)
+
+        # Verify all topics were attempted
+        assert set(subscribed_topics) == {
+            "topic1",
+            "topic2",
+            "topic3",
+        }, "Should attempt to subscribe to all topics"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_handles_partial_subscription_failure():
+    """Test that reconnection continues even with partial subscription failures."""
+    mock_api = MagicMock()
+    mock_api.username = "test@example.com"
+
+    with patch("aiophyn.mqtt.paho_mqtt.Client"):
+        client = MQTTClient(mock_api)
+
+        # Add multiple topics
+        client.topics = ["topic1", "topic2", "topic3", "topic4"]
+
+        async def mock_get_mqtt_info():
+            return "host.example.com", "/mqtt"
+
+        client.get_mqtt_info = mock_get_mqtt_info
+
+        # Mock successful connection
+        async def mock_executor(*args):
+            pass
+
+        client.event_loop.run_in_executor = mock_executor
+        client.client.ws_set_options = Mock()
+
+        # Mock connect_evt
+        async def mock_wait_for(event_wait, timeout):
+            client.connect_evt.set()
+            return True
+
+        # Mock _subscribe_with_ack - some fail, some succeed
+        async def mock_subscribe_with_ack(topic, timeout=5):
+            if topic in ["topic2", "topic4"]:
+                # Return error code for these topics
+                return (1, 999)  # Error code 1
+            return (0, 123)  # Success for others
+
+        client._subscribe_with_ack = mock_subscribe_with_ack
+
+        with patch("asyncio.wait_for", side_effect=mock_wait_for):
+            # Should complete successfully despite partial failures
+            await client._do_reconnect(first=True)
+
+        # Verify reconnect completed (reconnect_evt cleared)
+        assert (
+            not client.reconnect_evt.is_set()
+        ), "Reconnect should complete even with partial subscription failures"
+
+
+@pytest.mark.asyncio
+async def test_on_subscribe_handles_tuple_format():
+    """Test that _on_subscribe correctly handles tuple format with event."""
+    mock_api = MagicMock()
+    mock_api.username = "test@example.com"
+
+    with patch("aiophyn.mqtt.paho_mqtt.Client"):
+        client = MQTTClient(mock_api)
+
+        # Create an event for acknowledgment
+        ack_evt = asyncio.Event()
+
+        # Add pending ack with tuple format (topic, event)
+        client.pending_acks[123] = ("test/topic", ack_evt)
+
+        # Call _on_subscribe
+        client._on_subscribe(None, None, 123, [0], None)
+
+        # Verify event was set
+        assert ack_evt.is_set(), "Event should be set"
+
+        # Verify topic was added
+        assert "test/topic" in client.topics, "Topic should be added"
+
+        # Verify pending_ack was removed
+        assert 123 not in client.pending_acks, "Pending ack should be removed"
+
+
+@pytest.mark.asyncio
+async def test_on_subscribe_handles_string_format():
+    """Test that _on_subscribe still handles old string format for backward compatibility."""
+    mock_api = MagicMock()
+    mock_api.username = "test@example.com"
+
+    with patch("aiophyn.mqtt.paho_mqtt.Client"):
+        client = MQTTClient(mock_api)
+
+        # Add pending ack with old string format
+        client.pending_acks[456] = "another/topic"
+
+        # Call _on_subscribe
+        client._on_subscribe(None, None, 456, [0], None)
+
+        # Verify topic was added
+        assert "another/topic" in client.topics, "Topic should be added"
+
+        # Verify pending_ack was removed
+        assert 456 not in client.pending_acks, "Pending ack should be removed"
+
+
+@pytest.mark.asyncio
+async def test_on_subscribe_avoids_duplicate_topics():
+    """Test that _on_subscribe doesn't add duplicate topics."""
+    mock_api = MagicMock()
+    mock_api.username = "test@example.com"
+
+    with patch("aiophyn.mqtt.paho_mqtt.Client"):
+        client = MQTTClient(mock_api)
+
+        # Pre-add the topic
+        client.topics = ["duplicate/topic"]
+
+        # Add pending ack for same topic
+        client.pending_acks[789] = "duplicate/topic"
+
+        # Call _on_subscribe
+        client._on_subscribe(None, None, 789, [0], None)
+
+        # Verify topic appears only once
+        assert (
+            client.topics.count("duplicate/topic") == 1
+        ), "Topic should not be duplicated"
