@@ -12,8 +12,9 @@ class RequestError(PhynError):
 
     ...
 
+
 class BrandError(Exception):
-    """ Define an error related to invalid brands."""
+    """Define an error related to invalid brands."""
 
     ...
 
